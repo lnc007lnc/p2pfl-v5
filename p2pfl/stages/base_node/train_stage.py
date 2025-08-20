@@ -17,6 +17,7 @@
 #
 """Train stage."""
 
+import base64
 import os
 from pathlib import Path
 from typing import Any, List, Optional, Set, Type, Union
@@ -26,11 +27,11 @@ try:
     LIBTORRENT_AVAILABLE = True
 except ImportError:
     LIBTORRENT_AVAILABLE = False
-    logger.warning("libtorrent not available, torrent generation will be skipped")
 
 from p2pfl.communication.commands.message.metrics_command import MetricsCommand
 from p2pfl.communication.commands.message.models_agregated_command import ModelsAggregatedCommand
 from p2pfl.communication.commands.message.models_ready_command import ModelsReadyCommand
+from p2pfl.communication.commands.message.torrent_share_command import TorrentShareCommand
 from p2pfl.communication.commands.weights.partial_model_command import PartialModelCommand
 from p2pfl.communication.protocols.communication_protocol import CommunicationProtocol
 from p2pfl.learning.aggregators.aggregator import Aggregator, NoModelsToAggregateError
@@ -80,7 +81,7 @@ class TrainStage(Stage):
             logger.info(state.addr, "🎓 Training done.")
             
             # Save model weights to tmp folder
-            TrainStage.__save_model_weights(state, learner)
+            TrainStage.__save_model_weights(state, learner, communication_protocol)
 
             check_early_stop(state)
 
@@ -113,13 +114,14 @@ class TrainStage(Stage):
             return None
 
     @staticmethod
-    def __save_model_weights(state: NodeState, learner: Learner) -> None:
+    def __save_model_weights(state: NodeState, learner: Learner, communication_protocol: CommunicationProtocol) -> None:
         """
         Save model weights to tmp/local_model folder after training.
         
         Args:
             state: The node state containing node address and round information.
             learner: The learner containing the trained model.
+            communication_protocol: Protocol for broadcasting torrents.
         """
         try:
             # Create directory structure (configurable via environment variable)
@@ -149,19 +151,20 @@ class TrainStage(Stage):
             logger.info(state.addr, f"💾 Model weights saved to: {filepath}")
             
             # Generate torrent for the saved weight file
-            TrainStage.__generate_torrent(state, filepath)
+            TrainStage.__generate_torrent(state, filepath, communication_protocol)
             
         except Exception as e:
             logger.warning(state.addr, f"⚠️ Failed to save model weights: {str(e)}")
 
     @staticmethod
-    def __generate_torrent(state: NodeState, filepath: Path) -> None:
+    def __generate_torrent(state: NodeState, filepath: Path, communication_protocol: CommunicationProtocol) -> None:
         """
-        Generate a torrent file for the saved weight file.
+        Generate a torrent file for the saved weight file and broadcast it.
         
         Args:
             state: The node state containing node address.
             filepath: Path to the weight file to create torrent for.
+            communication_protocol: Protocol for broadcasting the torrent.
         """
         if not LIBTORRENT_AVAILABLE:
             logger.debug(state.addr, "Skipping torrent generation (libtorrent not available)")
@@ -212,8 +215,52 @@ class TrainStage(Stage):
             
             logger.info(state.addr, f"🌊 Torrent created: {torrent_path.name} (hash: {info_hash[:8]}...)")
             
+            # Broadcast torrent to all nodes (non-blocking)
+            TrainStage.__broadcast_torrent(
+                state, 
+                communication_protocol, 
+                torrent_data, 
+                torrent_path.name,
+                info_hash
+            )
+            
         except Exception as e:
             logger.warning(state.addr, f"⚠️ Failed to generate torrent: {str(e)}")
+
+    @staticmethod
+    def __broadcast_torrent(
+        state: NodeState, 
+        communication_protocol: CommunicationProtocol,
+        torrent_data: bytes,
+        filename: str,
+        info_hash: str
+    ) -> None:
+        """
+        Broadcast torrent file to all connected nodes.
+        
+        Args:
+            state: The node state containing node address and round.
+            communication_protocol: Protocol for broadcasting.
+            torrent_data: The torrent file binary data.
+            filename: The torrent filename.
+            info_hash: The torrent info hash.
+        """
+        try:
+            # Encode torrent data to base64 for transmission
+            encoded_torrent = base64.b64encode(torrent_data).decode('utf-8')
+            
+            # Build and broadcast the message
+            msg = communication_protocol.build_msg(
+                TorrentShareCommand.get_name(),
+                [encoded_torrent, filename, info_hash],
+                round=state.round
+            )
+            communication_protocol.broadcast(msg)
+            
+            logger.info(state.addr, f"📡 Broadcasted torrent {filename} to all nodes")
+            
+        except Exception as e:
+            logger.warning(state.addr, f"⚠️ Failed to broadcast torrent: {str(e)}")
 
     @staticmethod
     def __evaluate(state: NodeState, learner: Learner, communication_protocol: CommunicationProtocol) -> None:
