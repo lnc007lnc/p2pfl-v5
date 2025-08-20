@@ -6,6 +6,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 P2PFL is a general-purpose open-source library for Decentralized Federated Learning systems using P2P networks and gossip protocols. It supports multiple ML frameworks (PyTorch, TensorFlow/Keras, JAX/Flax) and communication protocols.
 
+## Important: Version Control Guidelines
+
+**ALWAYS commit code changes to Git after modifications to enable easy rollback.**
+
+After making significant code changes:
+```bash
+# Check status and review changes
+git status
+git diff
+
+# Add and commit changes
+git add .
+git commit -m "Description of changes"
+
+# Push to remote repository (if configured)
+git push
+```
+
 ## Development Commands
 
 ### Package Management
