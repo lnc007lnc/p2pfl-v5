@@ -69,17 +69,24 @@ class TorrentShareCommand(Command):
         if torrent_data is None or filename is None:
             logger.warning(self.__state.addr, f"⚠️ Received invalid torrent share from {source}")
             return
+        
+        # Skip if receiving own torrent (nodes shouldn't save their own torrents)
+        if source == self.__state.addr:
+            logger.debug(self.__state.addr, f"Skipping own torrent from {source}")
+            return
 
         try:
             # Decode base64 torrent data
             torrent_bytes = base64.b64decode(torrent_data)
             
-            # Create directory structure: tmp/torrents_{node_name}/
-            source_node_name = source.replace(":", "_").replace(".", "_")
-            torrent_dir = Path(os.getcwd()) / "tmp" / f"torrents_{source_node_name}"
+            # Create directory structure: tmp/torrents_{receiver_node}/
+            # Directory is named after THIS node (receiver), not the source
+            receiver_node_name = self.__state.addr.replace(":", "_").replace(".", "_")
+            torrent_dir = Path(os.getcwd()) / "tmp" / f"torrents_{receiver_node_name}"
             torrent_dir.mkdir(parents=True, exist_ok=True)
             
             # Save torrent file with naming: {source_node}_round_{round}.torrent
+            source_node_name = source.replace(":", "_").replace(".", "_")
             torrent_filename = f"{source_node_name}_round_{round}.torrent"
             torrent_path = torrent_dir / torrent_filename
             
