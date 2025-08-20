@@ -129,6 +129,174 @@ The project uses pytest for testing with coverage tracking. Tests are organized 
 - Learning frameworks and aggregators
 - Reproducibility and simulation capabilities
 
+## Stage Transition Mechanism (Training Workflow)
+
+P2PFL uses a state machine architecture where each training round goes through multiple stages. Understanding this mechanism is crucial for debugging and extending the framework.
+
+### Complete Stage Flow
+
+```
+StartLearningStage → VoteTrainSetStage → {TrainStage | WaitAggregatedModelsStage} → GossipModelStage → RoundFinishedStage → [Next Round]
+```
+
+### Stage Details and Transition Conditions
+
+#### 1. StartLearningStage
+**File**: `p2pfl/stages/base_node/start_learning_stage.py`
+- **Purpose**: Initialize learning round, wait for network convergence
+- **Key Actions**:
+  - Wait for heartbeat convergence (`Settings.heartbeat.WAIT_CONVERGENCE` seconds)
+  - Gossip initial model to neighbors
+  - Prepare for vote phase
+- **Transition Condition**: Always proceeds after convergence wait
+- **Next Stage**: `VoteTrainSetStage`
+- **Blocking**: Yes - sleeps for heartbeat convergence time
+
+#### 2. VoteTrainSetStage  
+**File**: `p2pfl/stages/base_node/vote_train_set_stage.py`
+- **Purpose**: Select which nodes will participate in training this round
+- **Key Actions**:
+  - Each node votes for training candidates with weights
+  - Broadcast votes using gossip protocol
+  - Aggregate votes to determine final training set
+- **Transition Condition**: **BRANCHING LOGIC**
+  - If `state.addr in state.train_set` → `TrainStage` (selected for training)
+  - If not selected → `WaitAggregatedModelsStage` (observer mode)
+- **Blocking**: Yes - 60-second timeout waiting for votes
+- **Critical Code**:
+  ```python
+  # vote_train_set_stage.py:109-126
+  timeout_occurred = communication_protocol.wait_for_messages(
+      60, lambda: len(state.train_set_votes) >= expected_votes
+  )
+  ```
+
+#### 3A. TrainStage (Training Nodes Path)
+**File**: `p2pfl/stages/base_node/train_stage.py`
+- **Purpose**: Perform local training and model aggregation
+- **Key Actions**:
+  - Local model training (`learner.fit()`)
+  - Save model weights to disk and generate torrents
+  - Add local model to aggregator
+  - **CRITICAL BLOCKING**: Wait for aggregation completion
+  - Broadcast aggregation status
+- **Transition Condition**: Training and aggregation completed
+- **Next Stage**: `GossipModelStage`
+- **Blocking**: Yes - `aggregator.wait_and_get_aggregation()` blocks until all training nodes contribute
+- **Critical Code**:
+  ```python
+  # train_stage.py:105
+  agg_model = aggregator.wait_and_get_aggregation()  # BLOCKS HERE
+  ```
+
+#### 3B. WaitAggregatedModelsStage (Non-Training Nodes Path)
+**File**: `p2pfl/stages/base_node/wait_agg_models_stage.py`  
+- **Purpose**: Wait for training nodes to complete aggregation
+- **Key Actions**:
+  - Wait for aggregation event from training nodes
+  - Handle timeout scenarios gracefully
+  - Broadcast readiness signal
+- **Transition Condition**: Receives aggregation completion event OR timeout
+- **Next Stage**: `GossipModelStage`
+- **Blocking**: Yes - event-based waiting with timeout protection
+- **Critical Code**:
+  ```python
+  # wait_agg_models_stage.py:50
+  event_set = state.aggregated_model_event.wait(timeout=Settings.training.AGGREGATION_TIMEOUT)
+  ```
+
+#### 4. GossipModelStage
+**File**: `p2pfl/stages/base_node/gossip_model_stage.py`
+- **Purpose**: Distribute aggregated model to all network nodes
+- **Key Actions**:
+  - Gossip final aggregated model using P2P protocol
+  - Ensure all nodes receive the updated model
+  - Handle network failures and retransmissions
+- **Transition Condition**: Gossip protocol completion
+- **Next Stage**: `RoundFinishedStage`
+- **Blocking**: Yes - gossip protocol runs until convergence or timeout
+
+#### 5. RoundFinishedStage
+**File**: `p2pfl/stages/base_node/round_finished_stage.py`
+- **Purpose**: Clean up round state and decide next action
+- **Key Actions**:
+  - Clear aggregator state
+  - Increment round counter
+  - Evaluate final metrics (if last round)
+- **Transition Condition**: Round count check
+  - If `state.round < state.total_rounds` → `VoteTrainSetStage` (next round)
+  - Else → `None` (training complete)
+- **Blocking**: No - immediate transition
+
+### Synchronization Points and Blocking Mechanisms
+
+#### Vote Synchronization
+- **Location**: VoteTrainSetStage
+- **Mechanism**: 60-second timeout waiting for all neighbor votes
+- **Fallback**: Proceeds with available votes on timeout
+- **Impact**: Can delay entire round if nodes are slow to vote
+
+#### Aggregation Synchronization  
+- **Location**: TrainStage (training nodes) + WaitAggregatedModelsStage (observers)
+- **Mechanism**: Event-based blocking with timeout protection
+- **Critical Point**: ALL training nodes must contribute before aggregation completes
+- **Timeout**: `Settings.training.AGGREGATION_TIMEOUT` (configurable)
+- **Impact**: Single slow/failed training node can delay entire network
+
+#### Gossip Synchronization
+- **Location**: GossipModelStage  
+- **Mechanism**: Asynchronous gossip with convergence detection
+- **Resilience**: Can handle node failures and network partitions
+- **Impact**: Generally robust but can be slow on poor networks
+
+### Performance Considerations
+
+1. **Bottlenecks**: 
+   - Vote timeout (60s fixed)
+   - Aggregation waiting (depends on slowest training node)
+   - Gossip convergence (network-dependent)
+
+2. **Failure Modes**:
+   - Training node failure → aggregation timeout → round fails
+   - Network partition → gossip incomplete → model inconsistency
+   - Vote timeout → reduced training set → performance impact
+
+3. **Scalability Limits**:
+   - More training nodes = longer aggregation wait
+   - Larger networks = slower gossip convergence
+   - Vote collection scales with network size
+
+### Debugging Stage Transitions
+
+**Key Log Messages to Monitor**:
+```bash
+# Stage transitions
+"🏃 Running stage: StageName"
+
+# Vote phase
+"🗳️ Sending train set vote"
+"🚂 Train set of X nodes"
+
+# Training phase  
+"🏋️‍♀️ Training..."
+"🎓 Training done"
+
+# Aggregation
+"⏳ Waiting aggregation"
+"✅ Aggregation event received"
+
+# Gossip
+"🗣️ Gossiping aggregated model"
+
+# Round completion
+"🎉 Round X of Y finished"
+```
+
+**Common Issues**:
+- Stuck in vote phase → Check network connectivity and timeout settings
+- Aggregation timeout → Check if all training nodes are responsive
+- Gossip delays → Monitor network conditions and gossip parameters
+
 ## Message Broadcasting and Communication Mechanisms
 
 ### Broadcast Functionality Overview
