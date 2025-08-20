@@ -21,6 +21,13 @@ import os
 from pathlib import Path
 from typing import Any, List, Optional, Set, Type, Union
 
+try:
+    import libtorrent as lt
+    LIBTORRENT_AVAILABLE = True
+except ImportError:
+    LIBTORRENT_AVAILABLE = False
+    logger.warning("libtorrent not available, torrent generation will be skipped")
+
 from p2pfl.communication.commands.message.metrics_command import MetricsCommand
 from p2pfl.communication.commands.message.models_agregated_command import ModelsAggregatedCommand
 from p2pfl.communication.commands.message.models_ready_command import ModelsReadyCommand
@@ -141,8 +148,72 @@ class TrainStage(Stage):
             
             logger.info(state.addr, f"💾 Model weights saved to: {filepath}")
             
+            # Generate torrent for the saved weight file
+            TrainStage.__generate_torrent(state, filepath)
+            
         except Exception as e:
             logger.warning(state.addr, f"⚠️ Failed to save model weights: {str(e)}")
+
+    @staticmethod
+    def __generate_torrent(state: NodeState, filepath: Path) -> None:
+        """
+        Generate a torrent file for the saved weight file.
+        
+        Args:
+            state: The node state containing node address.
+            filepath: Path to the weight file to create torrent for.
+        """
+        if not LIBTORRENT_AVAILABLE:
+            logger.debug(state.addr, "Skipping torrent generation (libtorrent not available)")
+            return
+            
+        try:
+            # Create torrent directory
+            torrent_dir = filepath.parent / "torrents"
+            torrent_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Generate torrent filename
+            torrent_path = torrent_dir / f"{filepath.stem}.torrent"
+            
+            # Create torrent
+            fs = lt.file_storage()
+            lt.add_files(fs, str(filepath))
+            
+            # Create torrent with piece size of 256KB
+            t = lt.create_torrent(fs, piece_size=256 * 1024)
+            
+            # Add trackers (you can customize these)
+            trackers = [
+                "udp://tracker.openbittorrent.com:80/announce",
+                "udp://tracker.opentrackr.org:1337/announce",
+                "udp://tracker.coppersurfer.tk:6969/announce"
+            ]
+            for tracker in trackers:
+                t.add_tracker(tracker, 0)
+            
+            # Set creator and comment
+            t.set_creator(f"P2PFL Node {state.addr}")
+            t.set_comment(f"Model weights for round {state.round}")
+            
+            # Add web seeds (optional, for HTTP fallback)
+            # t.add_url_seed(f"http://your-server.com/models/{filepath.name}")
+            
+            # Generate torrent
+            lt.set_piece_hashes(t, str(filepath.parent))
+            torrent_data = lt.bencode(t.generate())
+            
+            # Save torrent file
+            with open(torrent_path, 'wb') as f:
+                f.write(torrent_data)
+            
+            # Calculate info hash for logging
+            torrent_info = lt.torrent_info(torrent_data)
+            info_hash = str(torrent_info.info_hash())
+            
+            logger.info(state.addr, f"🌊 Torrent created: {torrent_path.name} (hash: {info_hash[:8]}...)")
+            
+        except Exception as e:
+            logger.warning(state.addr, f"⚠️ Failed to generate torrent: {str(e)}")
 
     @staticmethod
     def __evaluate(state: NodeState, learner: Learner, communication_protocol: CommunicationProtocol) -> None:
