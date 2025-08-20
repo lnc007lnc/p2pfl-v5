@@ -28,7 +28,6 @@ from p2pfl.communication.commands.weights.partial_model_command import PartialMo
 from p2pfl.communication.protocols.communication_protocol import CommunicationProtocol
 from p2pfl.learning.aggregators.aggregator import Aggregator, NoModelsToAggregateError
 from p2pfl.learning.frameworks.learner import Learner
-from p2pfl.learning.frameworks.p2pfl_model import P2PFLModel
 from p2pfl.management.logger import logger
 from p2pfl.node_state import NodeState
 from p2pfl.stages.stage import EarlyStopException, Stage, check_early_stop
@@ -97,9 +96,6 @@ class TrainStage(Stage):
             # Set aggregated model
             agg_model = aggregator.wait_and_get_aggregation()
             learner.set_model(agg_model)
-            
-            # Save aggregated model weights
-            TrainStage.__save_aggregated_model(state, agg_model)
 
             # Share that aggregation is done
             communication_protocol.broadcast(communication_protocol.build_msg(ModelsReadyCommand.get_name(), [], round=state.round))
@@ -120,7 +116,9 @@ class TrainStage(Stage):
         """
         try:
             # Create directory structure (configurable via environment variable)
-            base_path = os.environ.get("P2PFL_MODEL_SAVE_PATH", "/tmp/local_model")
+            # Default to local tmp folder in project directory
+            default_path = os.path.join(os.getcwd(), "tmp", "local_model")
+            base_path = os.environ.get("P2PFL_MODEL_SAVE_PATH", default_path)
             base_dir = Path(base_path)
             base_dir.mkdir(parents=True, exist_ok=True)
             
@@ -145,40 +143,6 @@ class TrainStage(Stage):
             
         except Exception as e:
             logger.warning(state.addr, f"⚠️ Failed to save model weights: {str(e)}")
-
-    @staticmethod
-    def __save_aggregated_model(state: NodeState, model: P2PFLModel) -> None:
-        """
-        Save aggregated model weights to tmp/local_model folder.
-        
-        Args:
-            state: The node state containing node address and round information.
-            model: The aggregated model to save.
-        """
-        try:
-            # Create directory structure (configurable via environment variable)
-            base_path = os.environ.get("P2PFL_MODEL_SAVE_PATH", "/tmp/local_model")
-            base_dir = Path(base_path)
-            base_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Generate filename for aggregated model
-            node_name = state.addr.replace(":", "_").replace(".", "_")
-            if state.round is not None:
-                filename = f"{node_name}_round_{state.round}_aggregated.pth"
-            else:
-                filename = f"{node_name}_aggregated.pth"
-            
-            filepath = base_dir / filename
-            
-            # Save the aggregated model weights
-            encoded_params = model.encode_parameters()
-            with open(filepath, 'wb') as f:
-                f.write(encoded_params)
-            
-            logger.info(state.addr, f"💾 Aggregated model saved to: {filepath}")
-            
-        except Exception as e:
-            logger.warning(state.addr, f"⚠️ Failed to save aggregated model: {str(e)}")
 
     @staticmethod
     def __evaluate(state: NodeState, learner: Learner, communication_protocol: CommunicationProtocol) -> None:
